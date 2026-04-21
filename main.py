@@ -49,7 +49,7 @@ def dota(message):
 def announce(message):
     if str(message.chat.id) not in ADMIN_IDS:
         return
-    
+
     user_message = message.text.strip()
     chat_id = user_message.split(" ")[1]
     message_text = " ".join(user_message.split(" ")[2:])
@@ -70,42 +70,42 @@ def replace_links(message):
 
     raw_protocol = match.group(1)
     fixed_protocol = raw_protocol if raw_protocol else "https://"
-    
+
     subdomains = match.group(2) if match.group(2) else ""
     # group(3) — это kk, нам оно не нужно при построении URL
     preview_domain = ""
     main_domain = match.group(4).lower()
-    preview_domain = "kksave.com"
-    
+    preview_domain = "kk" + main_domain
+
     path = match.group(5) if match.group(5) else ""
-    
+
     path_no_args = path.split("?")[0]
 
     # Превью-ссылка — всегда с kk
     hidden_url = f"{fixed_protocol}{subdomains}{preview_domain}{path}"
-    
+
     # Оригинальная ссылка — всегда без kk
     full_original_url = f"{fixed_protocol}{subdomains}{main_domain}{path}"
-    
+
     # Красивый текст — без протокола и поддоменов
     pretty_link_text = f"{main_domain}{path_no_args}".rstrip("/")
 
     hidden_url_preview = f'<a href="{hidden_url}">&#8203;</a>'
-    
+
     user_message = ""
     if CONFIG['ATTACH_USER_TEXT']:
         user_message = URL_PATTERN.sub('', message.text).strip()
-    
+
     pretty_url = ""
     if CONFIG['SHOW_PRETTY_LINK']:
         pretty_url = f'<a href="{full_original_url}">🔗 {pretty_link_text}</a>'
-        
+
     author = ""
     if CONFIG['SHOW_AUTHOR'] and message.chat.type != 'private':
         user = message.from_user
         full_name = f"{user.first_name} {user.last_name if user.last_name else ''}".strip()
         author = f'<a href="tg://user?id={user.id}">👤 {full_name}</a>'
-    
+
 
     parts = [
         user_message + "\n" if user_message else None,
@@ -117,7 +117,7 @@ def replace_links(message):
     final_text = final_text.replace("\n"*3, "\n"*2).strip().strip("\n")
 
     reply_to = message.message_id if CONFIG['SEND_AS_REPLY'] else None
-    
+
     try:
         bot.send_message(
             chat_id=message.chat.id,
@@ -125,10 +125,10 @@ def replace_links(message):
             parse_mode='HTML',
             reply_to_message_id=reply_to
         )
-        
+
         if CONFIG['DELETE_ORIGINAL']:
             bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
-            
+
     except Exception as e:
         print(f"Error: {e}")
 
