@@ -3,6 +3,8 @@ import re
 import telebot
 from dotenv import load_dotenv
 from datetime import datetime
+from pathlib import Path
+import json
 
 
 load_dotenv()
@@ -33,8 +35,22 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 
 # group(1) - протокол, group(2) - поддомены, group(3) - опциональный kk, group(4) - домен, group(5) - путь
-URL_PATTERN = re.compile(r'(?i)(?<!\w)(https?://)?((?:[\w-]+\.)*)(kk)?(instagram\.com|tiktok\.com)(\S*)')
+URL_PATTERN = re.compile(r'(?i)(?<!\w)(https?://)?((?:[\w-]+\.)*)(kk)?(instagram\.com|tiktok\.com|twitter\.com|x\.com)(\S*)')
 ADMIN_IDS = os.getenv('ADMIN_IDS', '').split(",")
+DOMAINS_FILENAME = "domains.json"
+if Path(DOMAINS_FILENAME).exists():
+    with open(DOMAINS_FILENAME, "r") as f:
+        DOMAINS = json.load(f)
+else:
+    DOMAINS = {
+        "instagram.com": "kksav.com",
+        "tiktok.com": "kksav.com",
+        "twitter.com": "kksav.com",
+        "x.com": "kksav.com",
+    }
+    with open(DOMAINS_FILENAME, "w") as f:
+        json.dump(DOMAINS, f, indent=4)
+
 
 @bot.message_handler(commands=['dota'])
 def dota(message):
@@ -48,6 +64,7 @@ def dota(message):
 @bot.message_handler(commands=['announce'])
 def announce(message):
     if str(message.chat.id) not in ADMIN_IDS:
+        bot.reply_to(message, "Nah broski, you are not an admin")
         return
 
     user_message = message.text.strip()
@@ -62,6 +79,26 @@ def announce(message):
 
 
 
+@bot.message_handler(commands=['setdomain'])
+def set_domain(message):
+    if str(message.chat.id) not in ADMIN_IDS:
+        bot.reply_to(message, "Nah broski, you are not an admin")
+        return
+    user_message = message.text.strip()
+    parts = user_message.split(" ")
+    if len(parts) != 3:
+        bot.reply_to(message, "Usage: /setdomain <original_domain> <preview_domain>")
+        return
+    
+    original_domain = parts[1].lower()
+    preview_domain = parts[2].lower()
+    if original_domain not in DOMAINS:
+        bot.reply_to(message, f"Domain {original_domain} is not supported. Options: {', '.join(DOMAINS.keys())}")
+        return
+    DOMAINS[original_domain] = preview_domain
+    bot.reply_to(message, f"Domain {original_domain} updated to {preview_domain}")
+
+
 @bot.message_handler(content_types=['text'])
 def replace_links(message):
     match = URL_PATTERN.search(message.text)
@@ -73,9 +110,8 @@ def replace_links(message):
 
     subdomains = match.group(2) if match.group(2) else ""
     # group(3) — это kk, нам оно не нужно при построении URL
-    preview_domain = ""
     main_domain = match.group(4).lower()
-    preview_domain = "kk" + main_domain
+    preview_domain = DOMAINS[main_domain]
 
     path = match.group(5) if match.group(5) else ""
 
