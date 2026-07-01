@@ -6,7 +6,6 @@ from pathlib import Path
 
 import telebot
 from dotenv import load_dotenv
-import json
 
 load_dotenv()
 
@@ -56,8 +55,6 @@ if os.path.exists(TAG_MEMBERS_FILENAME):
         pass
 
 
-
-
 def format_member_ids_to_tag(members: list[str]) -> list[str]:
     return ["@" + member for member in members]
 
@@ -70,7 +67,8 @@ def settaggroup(message):
         message,
         f"Tag group for this chat is set. {len(member_ids)} members: {', '.join(member_ids)}",
     )
-    with open("")
+    with open(TAG_MEMBERS_FILENAME, "w", encoding="utf-8") as f:
+        f.write(json.dumps(TAG_MEMBERS, ensure_ascii=False))
 
 
 @bot.message_handler(commands=["dota"])
