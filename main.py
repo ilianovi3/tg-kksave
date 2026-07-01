@@ -17,16 +17,6 @@ CONFIG = {
 }
 
 
-WEEKDAYS_NAMES = {
-    0: "Понедельник",
-    1: "Вторник",
-    2: "Среда",
-    3: "Четверг",
-    4: "Пятница",
-    5: "Суббота",
-    6: "Воскресенье",
-}
-
 TOKEN = os.getenv("TG_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("TG_BOT_TOKEN is not set")
@@ -62,17 +52,19 @@ def format_member_ids_to_tag(members: list[str]) -> str:
 
 @bot.message_handler(commands=["settaggroup"])
 def settaggroup(message):
-    member_ids = message.text.strip().replace("@", "").split()
+    member_ids = message.text.strip().replace("@", "").split()[1:]
     TAG_MEMBERS[message.chat.id] = member_ids
     bot.reply_to(
         message,
-        f"Tag group for this chat is set. {len(member_ids)} members: {member_ids}",
+        f"Tag group for this chat is set. {len(member_ids)} members: {', '.join(member_ids)}",
     )
 
 
 @bot.message_handler(commands=["dota"])
 def dota(message):
-    response_text = f"Вы были приглашены в Защиту Древних 2!\n{format_member_ids_to_tag(TAG_MEMBERS[message.chat.id])}"
+    user_tags = format_member_ids_to_tag(TAG_MEMBERS[message.chat.id])
+    random.shuffle(user_tags)
+    response_text = f"Вы были приглашены в Защиту Древних 2!\n{user_tags}"
     bot.send_message(chat_id=message.chat.id, text=response_text, parse_mode="HTML")
 
 
