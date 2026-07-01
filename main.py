@@ -47,8 +47,8 @@ else:
 TAG_MEMBERS: dict[str, list[str]] = {}
 
 
-def format_member_ids_to_tag(members: list[str]) -> str:
-    return " ".join(["@" + member for member in members])
+def format_member_ids_to_tag(members: list[str]) -> list[str]:
+    return ["@" + member for member in members]
 
 
 @bot.message_handler(commands=["settaggroup"])
@@ -63,9 +63,10 @@ def settaggroup(message):
 
 @bot.message_handler(commands=["dota"])
 def dota(message):
-    user_tags = format_member_ids_to_tag(TAG_MEMBERS[message.chat.id])
+    user_tags = format_member_ids_to_tag(TAG_MEMBERS.get(message.chat.id, []))
     random.shuffle(user_tags)
-    response_text = f"Вы были приглашены в Защиту Древних 2!\n{user_tags}"
+    tags_text = "" if user_tags else f"\n{' '.join(user_tags)}"
+    response_text = "Вы были приглашены в Защиту Древних 2!" + tags_text
     bot.send_message(chat_id=message.chat.id, text=response_text, parse_mode="HTML")
 
 
