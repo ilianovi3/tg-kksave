@@ -6,6 +6,7 @@ from pathlib import Path
 
 import telebot
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 
@@ -44,7 +45,17 @@ else:
         json.dump(DOMAINS, f, indent=4)
 
 
+TAG_MEMBERS_FILENAME = "tag_members.json"
 TAG_MEMBERS: dict[str, list[str]] = {}
+
+if os.path.exists(TAG_MEMBERS_FILENAME):
+    try:
+        with open(TAG_MEMBERS_FILENAME, "r", encoding="utf-8") as f:
+            TAG_MEMBERS = json.loads(f.read())
+    except:
+        pass
+
+
 
 
 def format_member_ids_to_tag(members: list[str]) -> list[str]:
@@ -59,13 +70,17 @@ def settaggroup(message):
         message,
         f"Tag group for this chat is set. {len(member_ids)} members: {', '.join(member_ids)}",
     )
+    with open("")
 
 
 @bot.message_handler(commands=["dota"])
 def dota(message):
     user_tags = format_member_ids_to_tag(TAG_MEMBERS.get(message.chat.id, []))
-    random.shuffle(user_tags)
-    tags_text = "" if user_tags else f"\n{' '.join(user_tags)}"
+    tags_text = ""
+    if user_tags:
+        random.shuffle(user_tags)
+        tags_text = f"\n{' '.join(user_tags)}"
+
     response_text = "Вы были приглашены в Защиту Древних 2!" + tags_text
     bot.send_message(chat_id=message.chat.id, text=response_text, parse_mode="HTML")
 
