@@ -4,7 +4,8 @@ import math
 import os
 import random
 import re
-from pathlib import Path
+import threading
+from collections import defaultdict
 from typing import Any
 
 import telebot
@@ -20,195 +21,223 @@ CONFIG = {
     "ATTACH_USER_TEXT": os.getenv("ATTACH_USER_TEXT", "1") == "1",
 }
 
-
 TOKEN = os.getenv("TG_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("TG_BOT_TOKEN is not set")
 
 bot = telebot.TeleBot(TOKEN)
 
-# group(1) - протокол, group(2) - поддомены, group(3) - опциональный kk, group(4) - домен, group(5) - путь
+# Обработчики выполняются в разных потоках, поэтому общее состояние
+# (PARTY_MEMBERS, TAG_MEMBERS, DOMAINS) и запись в файлы защищены одним локом.
+STATE_LOCK = threading.Lock()
+
+# ADMIN_IDS сравнивается с id ПОЛЬЗОВАТЕЛЯ (from_user.id), а не чата.
+ADMIN_IDS: set[str] = {
+    part.strip() for part in os.getenv("ADMIN_IDS", "").split(",") if part.strip()
+}
+
+# group(1) — протокол, group(2) — поддомены, group(3) — опциональный kk,
+# group(4) — домен, group(5) — путь
 URL_PATTERN = re.compile(
     r"(?i)(?<!\w)(https?://)?((?:[\w-]+\.)*)(kk)?(instagram\.com|tiktok\.com|twitter\.com|x\.com)(\S*)"
 )
-ADMIN_IDS = os.getenv("ADMIN_IDS", "").split(",")
+
 DOMAINS_FILENAME = "domains.json"
-if Path(DOMAINS_FILENAME).exists():
-    with open(DOMAINS_FILENAME, "r") as f:
-        DOMAINS = json.load(f)
-else:
-    DOMAINS = {
-        "instagram.com": "instagramkk.com",
-        "tiktok.com": "kksav.com",
-        "twitter.com": "kksav.com",
-        "x.com": "kksav.com",
-    }
-    with open(DOMAINS_FILENAME, "w") as f:
-        json.dump(DOMAINS, f, indent=4)
-
-
 TAG_MEMBERS_FILENAME = "tag_members.json"
-TAG_MEMBERS: dict[str, list[str]] = {}
-PARTY_MEMBERS: dict[str, dict[int, tuple[Any, datetime.datetime]]] = defaultdict(dict)
-PARTY_INVITE_RESET_TIME_IN_MINUTES: int = 1
+
+DEFAULT_DOMAINS = {
+    "instagram.com": "instagramkk.com",
+    "tiktok.com": "kksav.com",
+    "twitter.com": "kksav.com",
+    "x.com": "kksav.com",
+}
+
+# Через сколько минут после времени готовности инвайт считается протухшим.
+PARTY_INVITE_RESET_MINUTES = int(os.getenv("PARTY_INVITE_RESET_MINUTES", "120"))
 
 
-if os.path.exists(TAG_MEMBERS_FILENAME):
-    try:
-        with open(TAG_MEMBERS_FILENAME, "r", encoding="utf-8") as f:
-            TAG_MEMBERS = json.loads(f.read())
-    except:
-        pass
-
-now = lambda: datetime.datetime.now(datetime.timezone.utc)
-
-
-def format_member_ids_to_tag(members: list[str]) -> list[str]:
-    return ["@" + member for member in members]
-
-
-def update_party_invites(chat_id):
-    global PARTY_MEMBERS, PARTY_INVITE_RESET_TIME_IN_MINUTES
-    for user_id, (user, dt) in PARTY_MEMBERS[chat_id].copy().values():
-        if now() > (
-            dt + datetime.timedelta(minutes=PARTY_INVITE_RESET_TIME_IN_MINUTES)
-        ):
-            del PARTY_MEMBERS[chat_id][user_id]
-
-
-def format_message_param_to_datetime(message) -> datetime.datetime | None:
-    time_offset_in_mins = " ".join(message.text.split()[1:])
-    if time_offset_in_mins:
+def load_json(path: str, default: Any) -> Any:
+    if os.path.exists(path):
         try:
-            time_offset_in_mins = int(time_offset_in_mins)
-        except:
-            bot.reply_to(
-                message=message, text='Пример "/accept 67" (67 minutes)", "/dota 67"'
-            )
-            return
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+    return default
 
-        ready_dt = now() + datetime.timedelta(minutes=time_offset_in_mins)
-    else:
-        ready_dt = now()
+
+def save_json(path: str, data: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+
+DOMAINS: dict[str, str] = load_json(DOMAINS_FILENAME, dict(DEFAULT_DOMAINS))
+if not os.path.exists(DOMAINS_FILENAME):
+    save_json(DOMAINS_FILENAME, DOMAINS)
+
+# Ключи чатов — строки, чтобы состояние переживало сериализацию в JSON.
+TAG_MEMBERS: dict[str, list[str]] = load_json(TAG_MEMBERS_FILENAME, {})
+PARTY_MEMBERS: dict[str, dict[int, tuple[Any, datetime.datetime]]] = defaultdict(dict)
+
+
+def now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def is_admin(message) -> bool:
+    return str(message.from_user.id) in ADMIN_IDS
+
+
+def parse_ready_time(message) -> datetime.datetime | None:
+    """Разбирает опциональное смещение в минутах из команды вида '/accept 15'.
+
+    Нет аргумента -> готов сейчас. Некорректный аргумент -> None.
+    """
+    args = message.text.split()[1:]
+    if not args:
+        return now()
+    try:
+        offset = int(args[0])
+    except ValueError:
+        return None
+    return now() + datetime.timedelta(minutes=offset)
+
+
+def prune_expired_invites(chat_id: str) -> None:
+    """Удаляет протухшие инвайты. Вызывающий должен держать STATE_LOCK."""
+    deadline = now() - datetime.timedelta(minutes=PARTY_INVITE_RESET_MINUTES)
+    party = PARTY_MEMBERS[chat_id]
+    expired = [uid for uid, (_, ready_dt) in party.items() if ready_dt < deadline]
+    for uid in expired:
+        del party[uid]
+
+
+def register_accept(message) -> datetime.datetime | None:
+    """Добавляет отправителя в состав. Возвращает время готовности либо None,
+    если аргумент команды некорректен (в этом случае шлёт подсказку)."""
+    ready_dt = parse_ready_time(message)
+    if ready_dt is None:
+        bot.reply_to(
+            message,
+            'Использование: "/accept 15" — готов через 15 минут, или "/accept" — готов сейчас',
+        )
+        return None
+
+    chat_id = str(message.chat.id)
+    with STATE_LOCK:
+        PARTY_MEMBERS[chat_id][message.from_user.id] = (message.from_user, ready_dt)
+        prune_expired_invites(chat_id)
     return ready_dt
 
 
-def get_party_members(chat_id) -> str:
-    global PARTY_MEMBERS
-    update_party_invites(chat_id)
+def format_party(chat_id: str) -> str:
+    with STATE_LOCK:
+        prune_expired_invites(chat_id)
+        party = list(PARTY_MEMBERS[chat_id].values())
 
-    party = PARTY_MEMBERS[chat_id].values()
-    parts = ["Текущий состав:", f"Количество — ({len(party)})"]
-    for player, dt in party:
-        player_name: str = player.first_name.strip()
-        if dt < now():
-            ready_text = "ГОТОВ"
+    current = now()
+    lines = ["Текущий состав:", f"Количество — ({len(party)})"]
+    for player, ready_dt in party:
+        name = player.first_name.strip()
+        if ready_dt <= current:
+            status = "ГОТОВ"
         else:
-            minutes_offset = math.ceil((dt - now()).seconds / 60)
-            ready_text = f"через {minutes_offset} minutes"
-
-        player_text = " — ".join([player_name, ready_text])
-        parts.append(player_text)
-    return "\n".join(parts)
-
-
-def update_user_accept(message) -> None:
-    global PARTY_MEMBERS
-
-    invite_accept_dt = format_message_param_to_datetime(message)
-    if invite_accept_dt is None:
-        return
-
-    PARTY_MEMBERS[message.chat.id][message.from_user.id] = [
-        message.from_user,
-        invite_accept_dt,
-    ]
-    update_party_invites(message.chat.id)
+            minutes = math.ceil((ready_dt - current).total_seconds() / 60)
+            status = f"через {minutes} мин"
+        lines.append(f"{name} — {status}")
+    return "\n".join(lines)
 
 
 @bot.message_handler(commands=["settaggroup"])
-def settaggroup(message):
-    global TAG_MEMBERS
-
-    member_ids = message.text.strip().replace("@", "").split()[1:]
-    TAG_MEMBERS[message.chat.id] = member_ids
+def set_tag_group(message):
+    member_ids = message.text.replace("@", "").split()[1:]
+    chat_id = str(message.chat.id)
+    with STATE_LOCK:
+        TAG_MEMBERS[chat_id] = member_ids
+        save_json(TAG_MEMBERS_FILENAME, TAG_MEMBERS)
     bot.reply_to(
         message,
-        f"Tag group for this chat is set. {len(member_ids)} members: {', '.join(member_ids)}",
+        f"Tag group for this chat is set. {len(member_ids)} members: "
+        f"{', '.join(member_ids) or '—'}",
     )
-    with open(TAG_MEMBERS_FILENAME, "w", encoding="utf-8") as f:
-        f.write(json.dumps(TAG_MEMBERS, ensure_ascii=False))
 
 
 @bot.message_handler(commands=["dota"])
 def dota(message):
-    update_user_accept(message)
+    if register_accept(message) is None:
+        return
 
-    user_tags = format_member_ids_to_tag(TAG_MEMBERS.get(message.chat.id, []))
-    tags_text = ""
-    if user_tags:
-        random.shuffle(user_tags)
-        tags_text = " ".join(user_tags)
+    chat_id = str(message.chat.id)
+    tags = ["@" + member for member in TAG_MEMBERS.get(chat_id, [])]
+    random.shuffle(tags)
 
-    response_text_parts = [
+    parts = [
         "Вы были приглашены в Dota 2!",
         "",
         '<a href="tg://bot_command?command=accept">ПРИНЯТЬ ПРИГЛАШЕНИЕ</a>',
-        get_party_members(message.chat.id),
-        "",
-        "",
-        tags_text,
+        format_party(chat_id),
     ]
-    response_text = "\n".join(response_text_parts)
-    bot.send_message(chat_id=message.chat.id, text=response_text, parse_mode="HTML")
+    if tags:
+        parts += ["", "", " ".join(tags)]
+
+    bot.send_message(chat_id=message.chat.id, text="\n".join(parts), parse_mode="HTML")
 
 
 @bot.message_handler(commands=["accept"])
 def accept_dota_party(message):
-    update_user_accept(message)
+    ready_dt = register_accept(message)
+    if ready_dt is None:
+        return
 
-    party_in_minutes = "".join(message.text.strip().split()[1:]).strip()
-    if party_in_minutes:
-        accept_text = f"{message.from_user.first_name.strip()} будет готов убивать нубиков через {party_in_minutes} minutes"
+    name = message.from_user.first_name.strip()
+    if ready_dt <= now():
+        accept_text = f"{name} готов убивать нубиков"
     else:
-        accept_text = f"{message.from_user.first_name.strip()} готов убивать нубиков"
+        minutes = math.ceil((ready_dt - now()).total_seconds() / 60)
+        accept_text = f"{name} будет готов убивать нубиков через {minutes} мин"
 
-    response_text_parts = [accept_text, "", get_party_members(message.chat.id)]
-    response_text = "\n".join(response_text_parts)
-    bot.send_message(chat_id=message.chat.id, text=response_text, parse_mode="HTML")
+    parts = [accept_text, "", format_party(str(message.chat.id))]
+    bot.send_message(chat_id=message.chat.id, text="\n".join(parts), parse_mode="HTML")
 
 
 @bot.message_handler(commands=["party"])
 def party(message):
     bot.send_message(
         chat_id=message.chat.id,
-        text=get_party_members(message.chat.id),
+        text=format_party(str(message.chat.id)),
         parse_mode="HTML",
     )
 
 
 @bot.message_handler(commands=["announce"])
 def announce(message):
-    if str(message.chat.id) not in ADMIN_IDS:
+    if not is_admin(message):
         bot.reply_to(message, "Nah broski, you are not an admin")
         return
 
-    user_message = message.text.strip()
-    chat_id = user_message.split(" ")[1]
-    message_text = " ".join(user_message.split(" ")[2:])
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        bot.reply_to(message, "Использование: /announce <chat_id> <текст>")
+        return
 
-    bot.send_message(chat_id=chat_id, text=message_text, parse_mode="HTML")
+    _, chat_id, text = parts
+    try:
+        bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"Не удалось отправить: {e}")
 
 
 @bot.message_handler(commands=["setdomain"])
 def set_domain(message):
-    if str(message.chat.id) not in ADMIN_IDS:
+    if not is_admin(message):
         bot.reply_to(message, "Nah broski, you are not an admin")
         return
-    user_message = message.text.strip()
-    parts = user_message.split(" ")
+
+    parts = message.text.split()
     if len(parts) != 3:
-        bot.reply_to(message, "Usage: /setdomain <original_domain> <preview_domain>")
+        bot.reply_to(
+            message, "Использование: /setdomain <original_domain> <preview_domain>"
+        )
         return
 
     original_domain = parts[1].lower()
@@ -216,11 +245,14 @@ def set_domain(message):
     if original_domain not in DOMAINS:
         bot.reply_to(
             message,
-            f"Domain {original_domain} is not supported. Options: {', '.join(DOMAINS.keys())}",
+            f"Домен {original_domain} не поддерживается. Доступно: {', '.join(DOMAINS)}",
         )
         return
-    DOMAINS[original_domain] = preview_domain
-    bot.reply_to(message, f"Domain {original_domain} updated to {preview_domain}")
+
+    with STATE_LOCK:
+        DOMAINS[original_domain] = preview_domain
+        save_json(DOMAINS_FILENAME, DOMAINS)
+    bot.reply_to(message, f"Домен {original_domain} → {preview_domain}")
 
 
 @bot.message_handler(content_types=["text"])
@@ -229,54 +261,51 @@ def replace_links(message):
     if not match:
         return
 
-    raw_protocol = match.group(1)
-    fixed_protocol = raw_protocol if raw_protocol else "https://"
-
-    subdomains = match.group(2) if match.group(2) else ""
-    # group(3) — это kk, нам оно не нужно при построении URL
+    protocol = match.group(1) or "https://"
+    subdomains = match.group(2) or ""
+    # group(3) — kk, при построении URL не используется
     main_domain = match.group(4).lower()
-    preview_domain = DOMAINS[main_domain]
+    path = match.group(5) or ""
 
-    path = match.group(5) if match.group(5) else ""
+    preview_domain = DOMAINS.get(main_domain)
+    if preview_domain is None:
+        return
 
     path_no_args = path.split("?")[0]
 
-    # Превью-ссылка — всегда с kk
-    hidden_url = f"{fixed_protocol}{subdomains}{preview_domain}{path}"
-
-    # Оригинальная ссылка — всегда без kk
-    full_original_url = f"{fixed_protocol}{subdomains}{main_domain}{path}"
-
-    # Красивый текст — без протокола и поддоменов
+    # Превью-ссылка — на превью-домен без поддоменов оригинала
+    # (иначе получаются несуществующие хосты вроде vm.kksav.com).
+    preview_url = f"{protocol}{preview_domain}{path}"
+    # Оригинальная ссылка — с поддоменами, чтобы реально открывалась.
+    original_url = f"{protocol}{subdomains}{main_domain}{path}"
     pretty_link_text = f"{main_domain}{path_no_args}".rstrip("/")
 
-    hidden_url_preview = f'<a href="{hidden_url}">&#8203;</a>'
+    hidden_preview = f'<a href="{preview_url}">&#8203;</a>'
 
-    user_message = ""
+    body_parts: list[str] = []
+
     if CONFIG["ATTACH_USER_TEXT"]:
-        user_message = URL_PATTERN.sub("", message.text).strip()
+        # Вырезаем только совпавшую ссылку, остальной текст (в т.ч. вторую
+        # ссылку) сохраняем, чтобы ничего не терять.
+        leftover = message.text[: match.start()] + message.text[match.end() :]
+        leftover = re.sub(r"[ \t]+", " ", leftover)
+        leftover = re.sub(r"\n{3,}", "\n\n", leftover).strip()
+        if leftover:
+            body_parts.append(leftover)
 
-    pretty_url = ""
+    meta: list[str] = []
     if CONFIG["SHOW_PRETTY_LINK"]:
-        pretty_url = f'<a href="{full_original_url}">🔗 {pretty_link_text}</a>'
+        meta.append(f'<a href="{original_url}">🔗 {pretty_link_text}</a>')
 
-    author = ""
     if CONFIG["SHOW_AUTHOR"] and message.chat.type != "private":
         user = message.from_user
-        full_name = (
-            f"{user.first_name} {user.last_name if user.last_name else ''}".strip()
-        )
-        author = f'<a href="tg://user?id={user.id}">👤 {full_name}</a>'
+        full_name = f"{user.first_name} {user.last_name or ''}".strip()
+        meta.append(f'<a href="tg://user?id={user.id}">👤 {full_name}</a>')
 
-    parts = [
-        user_message + "\n" if user_message else None,
-        pretty_url if pretty_url else None,
-        author if author else None,
-    ]
-    parts = [part for part in parts if part is not None]
-    final_text = hidden_url_preview + "\n".join(parts)
-    final_text = final_text.replace("\n" * 3, "\n" * 2).strip().strip("\n")
+    if meta:
+        body_parts.append("\n".join(meta))
 
+    final_text = hidden_preview + "\n\n".join(body_parts)
     reply_to = message.message_id if CONFIG["SEND_AS_REPLY"] else None
 
     try:
@@ -286,14 +315,12 @@ def replace_links(message):
             parse_mode="HTML",
             reply_to_message_id=reply_to,
         )
-
         if CONFIG["DELETE_ORIGINAL"]:
             bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
-
     except Exception as e:
         print(f"Error: {e}")
 
 
 if __name__ == "__main__":
-    print("🚀 Бот запущен")
+    print("Бот запущен")
     bot.infinity_polling()

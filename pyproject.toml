@@ -1,16 +1,10 @@
 [project]
-name = "tg-kksocial"
+name = "tg-kksave"
 version = "0.1.0"
-description = ""
-authors = [{ name = "Ilia Novikov", email = "closypost@gmail.com" }]
+description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = ["pytelegrambotapi (>=4.31.0,<5.0.0)", "python-dotenv (>=1.2.2,<2.0.0)"]
-
-
-[tool.poetry]
-package-mode = false
-
-[build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires-python = ">=3.13"
+dependencies = [
+    "pytelegrambotapi>=4.34.0",
+    "python-dotenv>=1.2.2",
+]
