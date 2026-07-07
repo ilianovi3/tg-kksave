@@ -1,8 +1,11 @@
+import datetime
 import json
+import math
 import os
 import random
 import re
 from pathlib import Path
+from typing import Any
 
 import telebot
 from dotenv import load_dotenv
@@ -35,7 +38,7 @@ if Path(DOMAINS_FILENAME).exists():
         DOMAINS = json.load(f)
 else:
     DOMAINS = {
-        "instagram.com": "kksav.com",
+        "instagram.com": "instagramkk.com",
         "tiktok.com": "kksav.com",
         "twitter.com": "kksav.com",
         "x.com": "kksav.com",
@@ -46,6 +49,9 @@ else:
 
 TAG_MEMBERS_FILENAME = "tag_members.json"
 TAG_MEMBERS: dict[str, list[str]] = {}
+PARTY_MEMBERS: dict[str, dict[int, tuple[Any, datetime.datetime]]] = defaultdict(dict)
+PARTY_INVITE_RESET_TIME_IN_MINUTES: int = 1
+
 
 if os.path.exists(TAG_MEMBERS_FILENAME):
     try:
@@ -54,13 +60,76 @@ if os.path.exists(TAG_MEMBERS_FILENAME):
     except:
         pass
 
+now = lambda: datetime.datetime.now(datetime.timezone.utc)
+
 
 def format_member_ids_to_tag(members: list[str]) -> list[str]:
     return ["@" + member for member in members]
 
 
+def update_party_invites(chat_id):
+    global PARTY_MEMBERS, PARTY_INVITE_RESET_TIME_IN_MINUTES
+    for user_id, (user, dt) in PARTY_MEMBERS[chat_id].copy().values():
+        if now() > (
+            dt + datetime.timedelta(minutes=PARTY_INVITE_RESET_TIME_IN_MINUTES)
+        ):
+            del PARTY_MEMBERS[chat_id][user_id]
+
+
+def format_message_param_to_datetime(message) -> datetime.datetime | None:
+    time_offset_in_mins = " ".join(message.text.split()[1:])
+    if time_offset_in_mins:
+        try:
+            time_offset_in_mins = int(time_offset_in_mins)
+        except:
+            bot.reply_to(
+                message=message, text='Пример "/accept 67" (67 minutes)", "/dota 67"'
+            )
+            return
+
+        ready_dt = now() + datetime.timedelta(minutes=time_offset_in_mins)
+    else:
+        ready_dt = now()
+    return ready_dt
+
+
+def get_party_members(chat_id) -> str:
+    global PARTY_MEMBERS
+    update_party_invites(chat_id)
+
+    party = PARTY_MEMBERS[chat_id].values()
+    parts = ["Текущий состав:", f"Количество — ({len(party)})"]
+    for player, dt in party:
+        player_name: str = player.first_name.strip()
+        if dt < now():
+            ready_text = "ГОТОВ"
+        else:
+            minutes_offset = math.ceil((dt - now()).seconds / 60)
+            ready_text = f"через {minutes_offset} minutes"
+
+        player_text = " — ".join([player_name, ready_text])
+        parts.append(player_text)
+    return "\n".join(parts)
+
+
+def update_user_accept(message) -> None:
+    global PARTY_MEMBERS
+
+    invite_accept_dt = format_message_param_to_datetime(message)
+    if invite_accept_dt is None:
+        return
+
+    PARTY_MEMBERS[message.chat.id][message.from_user.id] = [
+        message.from_user,
+        invite_accept_dt,
+    ]
+    update_party_invites(message.chat.id)
+
+
 @bot.message_handler(commands=["settaggroup"])
 def settaggroup(message):
+    global TAG_MEMBERS
+
     member_ids = message.text.strip().replace("@", "").split()[1:]
     TAG_MEMBERS[message.chat.id] = member_ids
     bot.reply_to(
@@ -73,14 +142,49 @@ def settaggroup(message):
 
 @bot.message_handler(commands=["dota"])
 def dota(message):
+    update_user_accept(message)
+
     user_tags = format_member_ids_to_tag(TAG_MEMBERS.get(message.chat.id, []))
     tags_text = ""
     if user_tags:
         random.shuffle(user_tags)
-        tags_text = f"\n{' '.join(user_tags)}"
+        tags_text = " ".join(user_tags)
 
-    response_text = "Вы были приглашены в Защиту Древних 2!" + tags_text
+    response_text_parts = [
+        "Вы были приглашены в Dota 2!",
+        "",
+        '<a href="tg://bot_command?command=accept">ПРИНЯТЬ ПРИГЛАШЕНИЕ</a>',
+        get_party_members(message.chat.id),
+        "",
+        "",
+        tags_text,
+    ]
+    response_text = "\n".join(response_text_parts)
     bot.send_message(chat_id=message.chat.id, text=response_text, parse_mode="HTML")
+
+
+@bot.message_handler(commands=["accept"])
+def accept_dota_party(message):
+    update_user_accept(message)
+
+    party_in_minutes = "".join(message.text.strip().split()[1:]).strip()
+    if party_in_minutes:
+        accept_text = f"{message.from_user.first_name.strip()} будет готов убивать нубиков через {party_in_minutes} minutes"
+    else:
+        accept_text = f"{message.from_user.first_name.strip()} готов убивать нубиков"
+
+    response_text_parts = [accept_text, "", get_party_members(message.chat.id)]
+    response_text = "\n".join(response_text_parts)
+    bot.send_message(chat_id=message.chat.id, text=response_text, parse_mode="HTML")
+
+
+@bot.message_handler(commands=["party"])
+def party(message):
+    bot.send_message(
+        chat_id=message.chat.id,
+        text=get_party_members(message.chat.id),
+        parse_mode="HTML",
+    )
 
 
 @bot.message_handler(commands=["announce"])
