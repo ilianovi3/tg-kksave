@@ -8,3 +8,5 @@ dependencies = [
     "pytelegrambotapi>=4.34.0",
     "python-dotenv>=1.2.2",
 ]
+[tool.uv]
+package = false
