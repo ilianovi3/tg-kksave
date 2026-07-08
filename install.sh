@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # Остановить скрипт при ошибке
 set -e
 
@@ -35,22 +34,23 @@ echo "🛠 Установка Docker Compose..."
 sudo apt install -y docker-compose-plugin
 sudo apt install docker-compose -y
 
-# 5. Установка Poetry
-if ! command -v poetry &> /dev/null
+# 5. Установка uv
+if ! command -v uv &> /dev/null
 then
-    echo "📜 Установка Poetry..."
-    curl -sSL https://install.python-poetry.org | python3 -
-    # Добавляем Poetry в PATH для текущей сессии
+    echo "📦 Установка uv..."
+    # UV_NO_MODIFY_PATH=1 — не даём установщику самому править профиль,
+    # PATH пропишем ниже вручную (uv ставится в ~/.local/bin)
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh
     export PATH="$HOME/.local/bin:$PATH"
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-    echo "✅ Poetry установлен."
+    echo "✅ uv установлен."
 else
-    echo "📜 Poetry уже установлен, пропускаем."
+    echo "📦 uv уже установлен, пропускаем."
 fi
 
 echo "--------------------------------------------------"
 echo "🎉 Установка завершена!"
-echo "⚠️  ВАЖНО: Чтобы применить изменения прав Docker и путей Poetry,"
+echo "⚠️  ВАЖНО: Чтобы применить изменения прав Docker и путей uv,"
 echo "   выполните команду: source ~/.bashrc"
 echo "   или просто перезайдите на сервер по SSH."
 echo "--------------------------------------------------"

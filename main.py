@@ -42,8 +42,10 @@ URL_PATTERN = re.compile(
     r"(?i)(?<!\w)(https?://)?((?:[\w-]+\.)*)(kk)?(instagram\.com|tiktok\.com|twitter\.com|x\.com)(\S*)"
 )
 
-DOMAINS_FILENAME = "domains.json"
-TAG_MEMBERS_FILENAME = "tag_members.json"
+DATA_DIR = os.getenv("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+DOMAINS_FILENAME = os.path.join(DATA_DIR, "domains.json")
+TAG_MEMBERS_FILENAME = os.path.join(DATA_DIR, "tag_members.json")
 
 DEFAULT_DOMAINS = {
     "instagram.com": "instagramkk.com",
