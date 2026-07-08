@@ -138,7 +138,7 @@ def format_party(chat_id: str) -> str:
         party = list(PARTY_MEMBERS[chat_id].values())
 
     current = now()
-    lines = ["Текущий состав:", f"Количество — ({len(party)})"]
+    lines = ["Текущий состав:", f"Количество геймеров — {len(party)}"]
     for player, ready_dt in party:
         name = player.first_name.strip()
         if ready_dt <= current:
@@ -176,7 +176,7 @@ def dota(message):
     parts = [
         "Вы были приглашены в Dota 2!",
         "",
-        '<a href="tg://bot_command?command=accept">ПРИНЯТЬ ПРИГЛАШЕНИЕ</a>',
+        "ПРИНЯТЬ ПРИГЛАШЕНИЕ /accept",
         format_party(chat_id),
     ]
     if tags:
