@@ -177,6 +177,7 @@ def dota(message):
         "Вы были приглашены в Dota 2!",
         "",
         "ПРИНЯТЬ ПРИГЛАШЕНИЕ /accept",
+        "",
         format_party(chat_id),
     ]
     if tags:
