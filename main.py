@@ -138,15 +138,15 @@ def format_party(chat_id: str) -> str:
         party = list(PARTY_MEMBERS[chat_id].values())
 
     current = now()
-    lines = ["Текущий состав:", f"Количество геймеров — {len(party)}"]
+    lines = ["Текущий состав:", f"Количество геймеров - {len(party)}"]
     for player, ready_dt in party:
-        name = player.first_name.strip()
+        name = f'<a href="tg://user?id={player.id}">{player.first_name.strip()}</a>'
         if ready_dt <= current:
             status = "ГОТОВ"
         else:
             minutes = math.ceil((ready_dt - current).total_seconds() / 60)
             status = f"через {minutes} мин"
-        lines.append(f"{name} — {status}")
+        lines.append(f"{name} - {status}")
     return "\n".join(lines)
 
 
