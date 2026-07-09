@@ -1,6 +1,6 @@
+import calendar
 import datetime
 import json
-import math
 import os
 import random
 import re
@@ -90,19 +90,91 @@ def is_admin(message) -> bool:
     return str(message.from_user.id) in ADMIN_IDS
 
 
-def parse_ready_time(message) -> datetime.datetime | None:
-    """Разбирает опциональное смещение в минутах из команды вида '/accept 15'.
+# Единицы длительности: y (год) и mo (месяц) считаются по календарю от текущей
+# даты, остальные — фиксированным числом секунд. 'm' — минуты, 'mo' — месяцы.
+DURATION_TOKEN_RE = re.compile(r"(?i)(\d+)\s*(mo|[ymwdhs])?")
+DURATION_SECONDS = {
+    "w": 604800,
+    "d": 86400,
+    "h": 3600,
+    "m": 60,
+    "s": 1,
+}
+
+# Ровно столько минут не конвертируем в часы — показываем числом в минутах.
+NO_CONVERT_MINUTES = {67, 69}
+
+
+def add_calendar(dt: datetime.datetime, years: int, months: int) -> datetime.datetime:
+    """Прибавляет годы и месяцы по календарю, а не простым умножением дней."""
+    total_months = dt.year * 12 + (dt.month - 1) + years * 12 + months
+    year, month = divmod(total_months, 12)
+    month += 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def parse_duration(message) -> datetime.datetime | None:
+    """Разбирает длительность из команды вида '/play 1d 1h 1m', '/play 1y 20m',
+    '/play 123' (голое число — минуты).
 
     Нет аргумента -> готов сейчас. Некорректный аргумент -> None.
     """
-    args = message.text.split()[1:]
-    if not args:
+    text = " ".join(message.text.split()[1:]).lower()
+    if not text.strip():
         return now()
-    try:
-        offset = int(args[0])
-    except ValueError:
+
+    # Если после вырезания всех валидных токенов остаётся мусор — аргумент кривой.
+    if DURATION_TOKEN_RE.sub("", text).strip():
         return None
-    return now() + datetime.timedelta(minutes=offset)
+
+    years = months = 0
+    seconds = 0
+    matched = False
+    for token in DURATION_TOKEN_RE.finditer(text):
+        matched = True
+        value = int(token.group(1))
+        unit = token.group(2)
+        if unit is None or unit == "m":
+            seconds += value * 60  # голое число и 'm' — минуты
+        elif unit == "y":
+            years += value
+        elif unit == "mo":
+            months += value
+        else:
+            seconds += value * DURATION_SECONDS[unit]
+
+    if not matched:
+        return None
+
+    result = now()
+    if years or months:
+        result = add_calendar(result, years, months)
+    return result + datetime.timedelta(seconds=seconds)
+
+
+def format_duration(total_seconds: float) -> str:
+    """Адаптивно форматирует длительность: дни, часы, минуты, секунды."""
+    total_seconds = int(total_seconds)
+
+    # 67 и 69 минут не конвертируем в часы — оставляем значение в минутах.
+    total_minutes, leftover_seconds = divmod(total_seconds, 60)
+    if leftover_seconds == 0 and total_minutes in NO_CONVERT_MINUTES:
+        return f"{total_minutes} мин"
+
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} д")
+    if hours:
+        parts.append(f"{hours} ч")
+    if minutes:
+        parts.append(f"{minutes} мин")
+    if seconds:
+        parts.append(f"{seconds} сек")
+    return " ".join(parts) or "0 сек"
 
 
 def prune_expired_invites(chat_id: str) -> None:
@@ -117,11 +189,13 @@ def prune_expired_invites(chat_id: str) -> None:
 def register_accept(message) -> datetime.datetime | None:
     """Добавляет отправителя в состав. Возвращает время готовности либо None,
     если аргумент команды некорректен (в этом случае шлёт подсказку)."""
-    ready_dt = parse_ready_time(message)
+    ready_dt = parse_duration(message)
     if ready_dt is None:
         bot.reply_to(
             message,
-            'Использование: "/accept 15" — готов через 15 минут, или "/accept" — готов сейчас',
+            'Использование: "/play 1h 30m" — готов через 1 час 30 минут, '
+            '"/play 15" — через 15 минут, "/play" — готов сейчас. '
+            "Подробнее: /help",
         )
         return None
 
@@ -144,8 +218,8 @@ def format_party(chat_id: str) -> str:
         if ready_dt <= current:
             status = "ГОТОВ"
         else:
-            minutes = math.ceil((ready_dt - current).total_seconds() / 60)
-            status = f"через {minutes} мин"
+            remaining = (ready_dt - current).total_seconds()
+            status = f"через {format_duration(remaining)}"
         lines.append(f"{name} - {status}")
     return "\n".join(lines)
 
@@ -176,7 +250,7 @@ def dota(message):
     parts = [
         "Вы были приглашены в Dota 2!",
         "",
-        "ПРИНЯТЬ ПРИГЛАШЕНИЕ /accept",
+        "ПРИНЯТЬ ПРИГЛАШЕНИЕ /play",
         "",
         format_party(chat_id),
     ]
@@ -186,8 +260,8 @@ def dota(message):
     bot.send_message(chat_id=message.chat.id, text="\n".join(parts), parse_mode="HTML")
 
 
-@bot.message_handler(commands=["accept"])
-def accept_dota_party(message):
+@bot.message_handler(commands=["play"])
+def play_dota_party(message):
     ready_dt = register_accept(message)
     if ready_dt is None:
         return
@@ -196,8 +270,8 @@ def accept_dota_party(message):
     if ready_dt <= now():
         accept_text = f"{name} готов убивать нубиков"
     else:
-        minutes = math.ceil((ready_dt - now()).total_seconds() / 60)
-        accept_text = f"{name} будет готов убивать нубиков через {minutes} мин"
+        remaining = (ready_dt - now()).total_seconds()
+        accept_text = f"{name} будет готов убивать нубиков через {format_duration(remaining)}"
 
     parts = [accept_text, "", format_party(str(message.chat.id))]
     bot.send_message(chat_id=message.chat.id, text="\n".join(parts), parse_mode="HTML")
@@ -209,6 +283,79 @@ def party(message):
         chat_id=message.chat.id,
         text=format_party(str(message.chat.id)),
         parse_mode="HTML",
+    )
+
+
+@bot.message_handler(commands=["leave"])
+def leave_party(message):
+    chat_id = str(message.chat.id)
+    with STATE_LOCK:
+        removed = PARTY_MEMBERS[chat_id].pop(message.from_user.id, None)
+        prune_expired_invites(chat_id)
+
+    name = message.from_user.first_name.strip()
+    if removed is None:
+        bot.reply_to(message, f"{name}, тебя и так не было в пати")
+        return
+
+    parts = [f"{name} покинул пати", "", format_party(chat_id)]
+    bot.send_message(chat_id=message.chat.id, text="\n".join(parts), parse_mode="HTML")
+
+
+HELP_TEXT = "\n".join(
+    [
+        "<b>Команды пати:</b>",
+        "/dota [время] — позвать всех в Dota 2 и записаться самому",
+        "/play [время] — записаться в пати",
+        "/leave — покинуть пати",
+        "/party — показать текущий состав",
+        "",
+        "<b>Формат времени</b> (можно комбинировать через пробел):",
+        "без аргумента — готов прямо сейчас",
+        "голое число — минуты, например /play 15",
+        "s — секунды, m — минуты, h — часы, d — дни, w — недели",
+        "mo — месяцы, y — годы (считаются по календарю от текущей даты)",
+        "",
+        "Примеры:",
+        "/play 123 — через 123 минуты",
+        "/play 23h — через 23 часа",
+        "/play 1d 1h 1m — через 1 день 1 час 1 минуту",
+        "/play 1y 20m — через 1 год и 20 минут",
+        "",
+        "<b>Прочее:</b>",
+        "/help — эта справка",
+        "Ссылки на instagram / tiktok / x подменяются на превью автоматически",
+    ]
+)
+
+
+@bot.message_handler(commands=["help", "start"])
+def help_command(message):
+    bot.send_message(chat_id=message.chat.id, text=HELP_TEXT, parse_mode="HTML")
+
+
+@bot.message_handler(commands=["adminhelp"])
+def admin_help_command(message):
+    if not is_admin(message):
+        bot.reply_to(message, "Nah broski, you are not an admin")
+        return
+
+    with STATE_LOCK:
+        domain_lines = [f"{original} → {preview}" for original, preview in DOMAINS.items()]
+
+    lines = [
+        "<b>Админ-команды:</b>",
+        "/announce &lt;chat_id&gt; &lt;текст&gt; — отправить сообщение в чат от имени бота",
+        "/setdomain &lt;оригинал&gt; &lt;превью&gt; — сменить превью-домен для подмены ссылок",
+        "/settaggroup @user1 @user2 … — задать группу для тега при /dota",
+        "",
+        "<b>Текущие превью-домены:</b>",
+        *domain_lines,
+        "",
+        f"<b>ID этого чата:</b> <code>{message.chat.id}</code>",
+    ]
+    bot.send_message(
+        chat_id=message.chat.id, text="\n".join(lines), parse_mode="HTML"
     )
 
 
